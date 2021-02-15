@@ -1,2 +1,2 @@
 # pleiotropy_autoimmune_depression_ukb
-Polygenic risk score analyses between autoimmune diseases and depression in UK Biobank
+RMarkdown script for the study: "Investigating pleiotropy between depression and autoimmune diseases using the UK Biobank"
