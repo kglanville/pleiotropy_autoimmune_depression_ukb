@@ -1,0 +1,244 @@
+---
+title: "GWAS of autoimmune diseases in the UK Biobank"
+author: "Kylie P. Glanville"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    number_sections: true
+---
+
+# GWAS autoimmune phenotypes
+
+</br>
+
+## Residualise
+
+</br>
+
+```{r residualise_autoimmune, eval=FALSE, include=TRUE}
+
+# Regress phenotypes on covariates in preparation for linear regression in BGENIE
+
+# Read data
+Cov <- fread("/file_path/covariates.txt", data.table=F)
+Covariates <- Cov[,c(2,5:12)]
+all_autoimmune <- fread("/file_path/new_autoimmune_all", data.table=F)
+
+## POSSIBLE
+
+# select possible columns, remove diseases with very small n
+autoimmune_possible <- all_autoimmune %>%
+  select(IID, contains("poss"), -pemphigoid_poss, -hidradentis_poss)
+
+# Merge with covariates file
+autoimmune_possible_covar <- merge(autoimmune_possible, Covariates, by = "IID")
+rownames(autoimmune_possible_covar) <- NULL
+
+# perform regression 
+
+#Get all column names to run regression on
+varlist = setdiff(colnames(autoimmune_possible_covar), c("IID", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "batch", "assessment_centre"))
+
+#Loop over columns 
+possible_auto_residuals <- autoimmune_possible_covar[,1:15]
+possible_auto_residuals[,2:15] <- lapply(varlist, function(x){
+  residuals(glm(formula = paste0("`", x, "` ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + as.factor(batch) + as.factor(assessment_centre)"), 
+     data = autoimmune_possible_covar, family="binomial", na.action = na.exclude), type="pearson")})
+
+write.table(possible_auto_residuals, "/file_path/possible_auto_residuals", col.names=T, row.names=F, quote=F)
+
+
+## PROBABLE
+
+# select probable columns, remove diseases with very small n
+autoimmune_probable <- all_autoimmune %>%
+  select(IID, contains("prob"), -pemphigoid_prob, -hidradentis_prob)
+
+# Merge with covariates file
+autoimmune_probable_covar <- merge(autoimmune_probable, Covariates, by = "IID")
+rownames(autoimmune_probable_covar) <- NULL
+        
+# perform regression 
+
+#Get all column names to run regression on
+varlist = setdiff(colnames(autoimmune_probable_covar), c("IID", "PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "batch", "assessment_centre"))
+
+#Loop over columns 
+probable_auto_residuals <- autoimmune_probable_covar[,1:15]
+probable_auto_residuals[,2:15] <- lapply(varlist, function(x){
+  residuals(glm(formula = paste0("`", x, "` ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6 + as.factor(batch) + as.factor(assessment_centre)"), 
+     data = autoimmune_probable_covar, family="binomial", na.action = na.exclude), type="pearson")})
+
+write.table(probable_auto_residuals, "/file_path/probable_auto_residuals", col.names=T, row.names=F, quote=F)
+
+```
+
+</br>
+
+## BGENIE GWAS
+
+</br>
+
+```{r bgenie_gwas_prep_pheno_autoimmune, include=TRUE, eval=FALSE}
+
+# Prepare phenotypes in correct order
+
+bgen_id <- read.table("/file_path/bgen_ordered_ids.txt", head=F)
+names(bgen_id)[1] <- "IID"
+
+# possible
+poss_resid <- read.table("/file_path/possible_auto_residuals", header = T)
+
+bgenie_poss_resid <- merge(bgen_id, poss_resid, by = "IID", all.x=TRUE)
+bgenie_poss_resid <- bgenie_poss_resid[order(match(bgenie_poss_resid$IID,bgen_id$IID)),] 
+bgenie_poss_resid <- bgenie_poss_resid[,2:ncol(bgenie_poss_resid)]
+
+write.table(bgenie_poss_resid, "/file_path/bgenie_poss_resid", col.names=T, row.names=F, quote=F, sep=" ")
+
+# probable
+prob_resid <- read.table("/file_path/probable_auto_residuals", header = T)
+
+bgenie_prob_resid <- merge(bgen_id, prob_resid, by = "IID", all.x=TRUE)
+bgenie_prob_resid <- bgenie_prob_resid[order(match(bgenie_prob_resid$IID,bgen_id$IID)),] 
+bgenie_prob_resid <- bgenie_prob_resid[,2:ncol(bgenie_prob_resid)]
+
+write.table(bgenie_prob_resid, "/file_path/bgenie_prob_resid", col.names=T, row.names=F, quote=F, sep=" ")
+
+```
+
+```{r bgenie_gwas_possible, include=TRUE, eval=FALSE}
+
+# perform GWAS in bgenie on residuals
+
+for i in {1..22}; do sbatch /file_path/bgenie_possible_auto.sh $i; done
+
+# bgenie_possible_auto.sh
+
+/file_path/bgenie_v1.2_static1 \
+--bgen /file_path/imp_chr${1}_MAF1_INFO4_v1.bgen \
+--pheno /file_path/bgenie_poss_resid \
+--miss NA \
+--scale_phenotypes \
+--scale_genotypes \
+--pvals \
+--out /file_path/bgenie_possible_auto_chr${1} \
+--thread 8
+
+# Create separate summary stats for each disease
+
+for chr in {1..22}; do
+  for j in {0..13}; do 
+    a=$(( 8 + (4 * $j)))
+    b=$(( 9 + (4 * $j)))
+    c=$(( 10 + (4 * $j)))
+    d=$(( 11 + (4 * $j)))
+      zcat /file_path/bgenie_possible_auto_chr${chr}.gz |\
+       awk '{print $1, $2, $3, $4, $5, $6, $7, $'$a', $'$b', $'$c', $'$d', 10^($'$d' * -1)}'\
+       > /file_path/bgenie_possible_auto_chr${chr}_pheno_${j}
+  done
+done
+
+# Join chromosomes for each phenotype
+
+for pheno in {0..13}; do
+head -n1 bgenie_possible_auto_chr1_pheno_${pheno} > poss_auto_pheno_${pheno}
+for fname in bgenie_possible_auto_chr*_pheno_${pheno}
+do
+    tail -n+2 $fname >> poss_auto_pheno_${pheno}
+done
+done
+
+# Change column headings
+
+# create list of files
+filelist <- list.files(path = "/file_path", recursive = FALSE,
+                            pattern = "poss_auto_pheno_*", 
+                            full.names = TRUE)
+
+# read summary stats as list  
+possible = lapply(filelist, function(x)fread(x, head=T)) 
+
+# name elements of list by disorder
+names(possible) <- c("possible_ankylosing_spondylitis", "possible_autoimmune_thyroid", "possible_rheumatoid_arthritis", "possible_sjogrens", "possible_sle", "possible_t1d", "possible_coeliac", "possible_inflammatory_bowel", "possible_myasthenia_gravis", "possible_multiple_sclerosis", "possible_pernecious_anemia", "possible_polymyalgia", "possible_psoriatic_arthritis", "possible_psoriasis")
+
+# renames columns
+colnames <- c("CHR","SNP","BP","A2","A1","AF","INFO","BETA","SE","T","-log10p","P")
+possible <- lapply(possible, setNames, colnames)
+
+# write summary statistics to file
+filenames <- names(possible)
+for (i in 1:length(possible)){
+  outname <- paste("/file_path/", filenames[i], sep= "")
+  write.table(possible[[i]], outname, col.names= T, row.names= F, quote = F)
+}
+
+```
+
+```{r bgenie_gwas_probable, include=TRUE, eval=FALSE}
+
+# perform GWAS in bgenie on residuals
+
+for i in {1..22}; do sbatch /file_path/bgenie_probable_auto.sh $i; done
+
+# bgenie_probable_auto.sh 
+
+/file_path/bgenie_v1.2_static1 \
+--bgen /file_path/imp_chr${1}_MAF1_INFO4_v1.bgen \
+--pheno /file_path/bgenie_prob_resid \
+--miss NA \
+--scale_phenotypes \
+--scale_genotypes \
+--pvals \
+--out /file_path/bgenie_probable_auto_chr${1} \
+--thread 8
+
+# Create separate summary stats for each disease
+
+for chr in {1..22}; do
+  for j in {0..13}; do 
+    a=$(( 8 + (4 * $j)))
+    b=$(( 9 + (4 * $j)))
+    c=$(( 10 + (4 * $j)))
+    d=$(( 11 + (4 * $j)))
+      zcat /file_path/bgenie_probable_auto_chr${chr}.gz |\
+       awk '{print $1, $2, $3, $4, $5, $6, $7, $'$a', $'$b', $'$c', $'$d', 10^($'$d' * -1)}'\
+       > /file_path/bgenie_probable_auto_chr${chr}_pheno_${j}
+  done
+done
+
+# Join chromosomes for each phenotype
+for pheno in {0..13}; do
+head -n1 bgenie_probable_auto_chr1_pheno_${pheno} > prob_auto_pheno_${pheno}
+for fname in bgenie_probable_auto_chr*_pheno_${pheno}
+do
+    tail -n+2 $fname >> prob_auto_pheno_${pheno}
+done
+done
+
+# Change column headings
+
+# create list of files
+filelist <- list.files(path = "/file_path", recursive = FALSE,
+                            pattern = "prob_auto_pheno_*", 
+                            full.names = TRUE)
+
+# read summary stats as list  
+probable = lapply(filelist, function(x)fread(x, head=T)) 
+
+# name elements of list by disorder
+names(probable) <- c("probable_ankylosing_spondylitis", "probable_autoimmune_thyroid", "probable_rheumatoid_arthritis", "probable_sjogrens", "probable_sle", "probable_t1d", "probable_coeliac", "probable_inflammatory_bowel", "probable_myasthenia_gravis", "probable_multiple_sclerosis", "probable_pernecious_anemia", "probable_polymyalgia", "probable_psoriatic_arthritis", "probable_psoriasis")
+
+# renames columns
+colnames <- c("CHR","SNP","BP","A2","A1","AF","INFO","BETA","SE","T","-log10p","P")
+probable <- lapply(probable, setNames, colnames)
+
+# write summary statistics to file
+filenames <- names(probable)
+for (i in 1:length(probable)){
+  outname <- paste("/file_path/", filenames[i], sep= "")
+  write.table(probable[[i]], outname, col.names= T, row.names= F, quote = F)
+}
+
+```
